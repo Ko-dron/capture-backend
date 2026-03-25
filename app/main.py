@@ -19,6 +19,7 @@ app.add_middleware(SecurityHeadersMiddleware)
 origins = [
     "http://localhost:5173",
     "https://capture-i9wg.onrender.com",
+    settings.FRONTEND_URL,
 ]
 
 app.add_middleware(
