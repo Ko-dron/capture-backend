@@ -16,17 +16,17 @@ app = FastAPI(
 # Middleware stack (applied bottom-to-top: CORS -> Security -> Rate Limiter)
 app.add_middleware(RateLimiterMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
+origins = [
+    "http://localhost:5173",
+    "https://capture-i9wg.onrender.com",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        settings.FRONTEND_URL,
-        "http://localhost:5173",
-        "http://localhost:3000",
-    ],
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE"],
-    allow_headers=["Authorization", "Content-Type"],
-    max_age=600,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
