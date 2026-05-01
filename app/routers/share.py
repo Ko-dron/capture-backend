@@ -127,6 +127,24 @@ async def get_shared_gallery(
     )
 
 
+@router.post("/{token}/screenshot-detected", status_code=status.HTTP_204_NO_CONTENT)
+async def log_screenshot_attempt(
+    token: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Mobile clients (iOS) ping this when a screenshot is detected on a shared
+    gallery so the owner has analytics on attempts. Returns 204 always — no PII."""
+    result = await db.execute(select(ShareLink).where(ShareLink.token == token))
+    share_link = result.scalar_one_or_none()
+    if share_link is not None:
+        # Increment a counter if the column exists; otherwise no-op. Kept tolerant
+        # so this doesn't fail before the migration lands.
+        attempts = getattr(share_link, "screenshot_attempts", None)
+        if attempts is not None:
+            share_link.screenshot_attempts = attempts + 1
+    return None
+
+
 @router.delete("/{link_id}")
 async def deactivate_share_link(
     link_id: uuid.UUID,

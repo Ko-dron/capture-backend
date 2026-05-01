@@ -12,6 +12,7 @@ from app.models.user import User
 from app.schemas.auth import (
     RegisterRequest,
     LoginRequest,
+    RefreshRequest,
     TokenResponse,
     UserResponse,
 )
@@ -33,12 +34,17 @@ LOCKOUT_THRESHOLD = 5
 LOCKOUT_WINDOW = timedelta(minutes=15)
 
 REFRESH_COOKIE_NAME = "refresh_token"
+MOBILE_CLIENT_HEADER = "X-Client-Type"
+MOBILE_CLIENT_VALUE = "mobile"
+
+
+def _is_mobile_client(request: Request) -> bool:
+    return request.headers.get(MOBILE_CLIENT_HEADER, "").lower() == MOBILE_CLIENT_VALUE
 
 
 def _check_lockout(username: str, ip: str) -> None:
     key = f"{username}:{ip}"
     now = datetime.now(timezone.utc)
-    # Prune old entries
     _failed_attempts[key] = [
         t for t in _failed_attempts[key] if now - t < LOCKOUT_WINDOW
     ]
@@ -81,13 +87,27 @@ def _clear_refresh_cookie(response: Response) -> None:
     )
 
 
+def _build_token_response(
+    request: Request,
+    response: Response,
+    access_token: str,
+    refresh_token: str,
+) -> TokenResponse:
+    """Return access token. For mobile clients, also include refresh token in body
+    (mobile apps cannot manage httpOnly cookies). For web clients, set httpOnly cookie."""
+    if _is_mobile_client(request):
+        return TokenResponse(access_token=access_token, refresh_token=refresh_token)
+    _set_refresh_cookie(response, refresh_token)
+    return TokenResponse(access_token=access_token)
+
+
 @router.post("/register", response_model=TokenResponse)
 async def register(
     data: RegisterRequest,
+    request: Request,
     response: Response,
     db: AsyncSession = Depends(get_db),
 ):
-    # Check username uniqueness
     result = await db.execute(select(User).where(User.username == data.username))
     if result.scalar_one_or_none() is not None:
         raise HTTPException(
@@ -95,11 +115,9 @@ async def register(
             detail="Username already taken",
         )
 
-    # Generate event token and QR data
     event_token = secrets.token_urlsafe(48)
     qr_code_data = f"{settings.FRONTEND_URL}/upload/{event_token}"
 
-    # Create user
     user = User(
         username=data.username,
         password_hash=hash_password(data.password),
@@ -111,14 +129,11 @@ async def register(
     db.add(user)
     await db.flush()
 
-    # Generate tokens
     token_data = {"sub": str(user.id)}
     access_token = create_access_token(token_data)
     refresh_token = create_refresh_token(token_data)
 
-    _set_refresh_cookie(response, refresh_token)
-
-    return TokenResponse(access_token=access_token)
+    return _build_token_response(request, response, access_token, refresh_token)
 
 
 @router.post("/login", response_model=TokenResponse)
@@ -129,11 +144,8 @@ async def login(
     db: AsyncSession = Depends(get_db),
 ):
     client_ip = request.client.host if request.client else "unknown"
-
-    # Check lockout
     _check_lockout(data.username, client_ip)
 
-    # Find user
     result = await db.execute(select(User).where(User.username == data.username))
     user = result.scalar_one_or_none()
 
@@ -144,48 +156,48 @@ async def login(
             detail="Invalid credentials",
         )
 
-    # Clear failed attempts on success
     _clear_failed_attempts(data.username, client_ip)
 
-    # Generate tokens
     token_data = {"sub": str(user.id)}
     access_token = create_access_token(token_data)
     refresh_token = create_refresh_token(token_data)
 
-    _set_refresh_cookie(response, refresh_token)
-
-    return TokenResponse(access_token=access_token)
+    return _build_token_response(request, response, access_token, refresh_token)
 
 
 @router.post("/refresh", response_model=TokenResponse)
 async def refresh_token(
     request: Request,
     response: Response,
+    body: RefreshRequest | None = None,
 ):
-    token = request.cookies.get(REFRESH_COOKIE_NAME)
+    # Mobile: read refresh token from request body. Web: read from httpOnly cookie.
+    if _is_mobile_client(request):
+        token = body.refresh_token if body else None
+    else:
+        token = request.cookies.get(REFRESH_COOKIE_NAME)
+
     if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="No refresh token",
         )
 
-    # Verify the refresh token
     payload = verify_token(token, expected_type="refresh")
     user_id = payload.get("sub")
 
-    # Rotate: issue new tokens
     token_data = {"sub": user_id}
     new_access_token = create_access_token(token_data)
     new_refresh_token = create_refresh_token(token_data)
 
-    _set_refresh_cookie(response, new_refresh_token)
-
-    return TokenResponse(access_token=new_access_token)
+    return _build_token_response(request, response, new_access_token, new_refresh_token)
 
 
 @router.post("/logout")
-async def logout(response: Response):
-    _clear_refresh_cookie(response)
+async def logout(request: Request, response: Response):
+    if not _is_mobile_client(request):
+        _clear_refresh_cookie(response)
+    # For mobile, the client clears its own SecureStore on logout.
     return {"message": "Logged out successfully"}
 
 
